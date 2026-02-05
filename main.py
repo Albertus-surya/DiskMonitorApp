@@ -19,7 +19,7 @@ class DiskMonitorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Disk Health Monitor - Cross Platform")
-        self.root.geometry("800x600")
+        self.root.geometry("900x700")
         
         self.disks_data = []
         self.running = True
@@ -94,14 +94,36 @@ class DiskMonitorApp:
         frame_top.pack(fill="x")
         ttk.Label(frame_top, text=f"Type: {disk['type']} | Path: {disk['device']}").pack(side="left")
         
+        # Health Bar
         frame_health = tk.Frame(card, bg=status_color, pady=5, padx=10)
         frame_health.pack(fill="x", pady=5)
         
-        tk.Label(frame_health, text=f"HEALTH: {hp}%", bg=status_color, fg="white", font=("Arial", 10, "bold")).pack(side="left")
+        tk.Label(frame_health, text=f"HEALTH: {hp}%", bg=status_color, fg="white", 
+                font=("Arial", 10, "bold")).pack(side="left")
         tk.Label(frame_health, text=f"Status: {disk['status']}", bg=status_color, fg="white").pack(side="right")
 
-        ttk.Label(card, text=f"Suhu: {disk['temp']}").pack(anchor="w")
+        # Info Grid (2 kolom)
+        info_frame = ttk.Frame(card)
+        info_frame.pack(fill="x", pady=5)
+        
+        # Kolom Kiri
+        left_col = ttk.Frame(info_frame)
+        left_col.pack(side="left", fill="both", expand=True, padx=5)
+        
+        ttk.Label(left_col, text=f"Suhu: {disk['temp']}", font=("Arial", 9)).pack(anchor="w", pady=2)
+        ttk.Label(left_col, text=f"Power On Time: {disk['power_on_time']}", 
+                 font=("Arial", 9)).pack(anchor="w", pady=2)
+        ttk.Label(left_col, text=f"Lifetime Writes: {disk['lifetime_writes']}", 
+                 font=("Arial", 9)).pack(anchor="w", pady=2)
+        
+        # Kolom Kanan
+        right_col = ttk.Frame(info_frame)
+        right_col.pack(side="right", fill="both", expand=True, padx=5)
+        
+        ttk.Label(right_col, text=f"Remaining Life: {disk['remaining_life']}", 
+                 font=("Arial", 9), foreground="blue").pack(anchor="w", pady=2)
 
+        # Tombol Grafik
         btn_graph = ttk.Button(card, text="Lihat Grafik History", command=lambda d=disk: self.show_graph(d))
         btn_graph.pack(anchor="e", pady=5)
 
@@ -139,7 +161,12 @@ class DiskMonitorApp:
         ax1.set_xlabel('Data Point (Waktu)')
         ax1.set_ylabel('Health (%)', color='green')
         
-        ax1.plot(healths[-20:], color='green', marker='o', linestyle='-')
+        if len(healths) > 0:
+            ax1.plot(healths[-20:], color='green', marker='o', linestyle='-', linewidth=2, markersize=6)
+            ax1.set_ylim(min(healths[-20:]) - 5, 105)
+        else:
+            ax1.text(0.5, 0.5, 'Belum ada data', ha='center', va='center', transform=ax1.transAxes)
+            
         ax1.grid(True, linestyle='--', alpha=0.7)
 
         canvas = FigureCanvasTkAgg(fig, master=graph_window)
@@ -192,22 +219,23 @@ def get_disk_info():
                     "type": media_type,
                     "status": status_raw,
                     "health_percent": health_percent,
-                    "temp": "N/A"
+                    "temp": "N/A",
+                    "power_on_time": "N/A",
+                    "remaining_life": "N/A",
+                    "lifetime_writes": "N/A"
                 })
 
     else:
-        # LINUX - Cek smartctl terinstall
+        # LINUX
         if not check_smartctl_installed():
             print("ERROR: smartctl tidak ditemukan!")
             print("Install dengan: sudo apt install smartmontools")
             return []
         
-        # Scan semua disk
         scan_output, scan_error = run_command("smartctl --scan")
         print("Scan Linux:", scan_output)
         
         if not scan_output:
-            # Fallback: coba scan manual common devices
             print("Mencoba fallback scan...")
             common_devices = ["/dev/sda", "/dev/sdb", "/dev/nvme0n1", "/dev/nvme1n1"]
             for device in common_devices:
@@ -246,21 +274,63 @@ def analyze_linux_disk(device_path):
     if temp_match: 
         temp = f"{temp_match.group(1)} °C"
     else:
-        # Coba format NVMe
         temp_match_nvme = re.search(r"Temperature:\s+(\d+)\s+Celsius", output)
         if temp_match_nvme:
             temp = f"{temp_match_nvme.group(1)} °C"
 
+    # Power On Time
+    power_on_time = "N/A"
+    power_match = re.search(r"Power_On_Hours.*?\s+(\d+)", output)
+    if power_match:
+        hours = int(power_match.group(1))
+        days = hours // 24
+        remaining_hours = hours % 24
+        power_on_time = f"{days} days, {remaining_hours} hours"
+    else:
+        # NVMe format
+        power_match_nvme = re.search(r"Power On Hours:\s+([\d,]+)", output)
+        if power_match_nvme:
+            hours = int(power_match_nvme.group(1).replace(",", ""))
+            days = hours // 24
+            remaining_hours = hours % 24
+            power_on_time = f"{days} days, {remaining_hours} hours"
+
     # Deteksi Tipe & Hitung Health
     is_nvme = "NVMe" in output or "nvme" in device_path
     health = 100
+    remaining_life = "N/A"
+    lifetime_writes = "N/A"
     
     if is_nvme:
+        # Health
         used_match = re.search(r"Percentage Used:\s+(\d+)%", output)
         if used_match: 
-            health = 100 - int(used_match.group(1))
+            used_percent = int(used_match.group(1))
+            health = 100 - used_percent
+            
+            # Estimasi Remaining Life (simple calculation)
+            if used_percent > 0:
+                # Asumsi: jika sudah pakai X%, remaining = (100-X) / X * power_on_days
+                if power_on_time != "N/A":
+                    days_match = re.search(r"(\d+) days", power_on_time)
+                    if days_match:
+                        days_used = int(days_match.group(1))
+                        if used_percent > 0:
+                            estimated_total_days = (days_used / used_percent) * 100
+                            remaining_days = int(estimated_total_days - days_used)
+                            if remaining_days > 365:
+                                remaining_life = f"more than {remaining_days // 365} years"
+                            else:
+                                remaining_life = f"{remaining_days} days"
+        
+        # Lifetime Writes (Data Units Written)
+        writes_match = re.search(r"Data Units Written:\s+([\d,]+)\s+\[([^\]]+)\]", output)
+        if writes_match:
+            lifetime_writes = writes_match.group(2).strip()
+        
         dtype = "NVMe SSD"
     else:
+        # SATA/HDD
         realloc = 0
         pending = 0
         re_match = re.search(r"Reallocated_Sector_Ct.*?\s+(\d+)$", output, re.MULTILINE)
@@ -271,11 +341,22 @@ def analyze_linux_disk(device_path):
         
         health = 100 - (realloc * 5) - (pending * 10)
         
+        # Total LBAs Written (for SSD)
+        lba_match = re.search(r"Total_LBAs_Written.*?\s+(\d+)$", output, re.MULTILINE)
+        if lba_match:
+            lba_written = int(lba_match.group(1))
+            # Convert LBA to TB (asumsi 512 bytes per LBA)
+            tb_written = (lba_written * 512) / (1024**4)
+            lifetime_writes = f"{tb_written:.2f} TB"
+        
         # Deteksi SSD vs HDD
         if "SSD" in model or "Solid State" in output:
             dtype = "SATA SSD"
+            # Untuk SSD, bisa estimasi remaining life dari write cycles
+            remaining_life = "Check vendor tools"
         else:
             dtype = "SATA HDD"
+            remaining_life = "N/A (HDD)"
 
     if health < 0: health = 0
 
@@ -285,7 +366,10 @@ def analyze_linux_disk(device_path):
         "type": dtype,
         "status": "PASSED" if health > 50 else "FAIL",
         "health_percent": health,
-        "temp": temp
+        "temp": temp,
+        "power_on_time": power_on_time,
+        "remaining_life": remaining_life,
+        "lifetime_writes": lifetime_writes
     }
 
 if __name__ == "__main__":
